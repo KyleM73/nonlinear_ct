@@ -1,0 +1,44 @@
+<?xml version="1.0"?>
+<robot name="robot">
+
+  <!-- Base link -->
+  <link name="base"/>
+
+  <!-- X prismatic joint -->
+  <link name="link_x"/>
+
+  <!-- End effector -->
+  <link name="end_effector">
+    <inertial>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <mass value="1.0"/>
+      <inertia ixx="1e-4" ixy="0.0" ixz="0.0" iyy="1e-4" iyz="0.0" izz="1e-4"/>
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0.05" rpy="0 0 0"/>
+      <geometry>
+        <!-- <cylinder length="0.01" radius="0.1"/> -->
+        <sphere radius="0.1"/>
+      </geometry>
+    </visual>
+  </link>
+
+  <!-- Prismatic joint along X axis -->
+  <joint name="joint_x" type="prismatic">
+    <parent link="base"/>
+    <child link="link_x"/>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+    <axis xyz="1 0 0"/>
+    <limit lower="-1e4" upper="1e4" effort="1e4" velocity="1e4"/>
+  </joint>
+
+  <!-- Prismatic joint along Y axis -->
+  <joint name="joint_y" type="prismatic">
+    <parent link="link_x"/>
+    <child link="end_effector"/>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-1e4" upper="1e4" effort="1e4" velocity="1e4"/>
+  </joint>
+
+</robot>

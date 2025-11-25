@@ -1,17 +1,9 @@
-# Python-generated files
-__pycache__/
-*.py[oc]
-build/
-dist/
-wheels/
+**/__pycache__/
 *.egg-info
-.DS_Store
-
-# Virtual environments
-.venv
-
-# Notebook checkpoints
-.ipynb_checkpoints
-
-# VSCode
-.vscode
+logs/
+outputs/
+**artifacts/
+resources/
+wandb/
+**.pdf
+**.png

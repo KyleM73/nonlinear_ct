@@ -1,0 +1,1 @@
+from .point_mass import POINT_MASS_CFG

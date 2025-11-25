@@ -1,0 +1,25 @@
+[package]
+
+# Semantic Versioning is used: https://semver.org/
+version = "0.1.0"
+
+# Description
+readme  = "README.md"
+
+title = "Nonlinear controls project"
+author = "Kyle Morgenstein"
+maintainer = "Kyle Morgenstein"
+maintainer_email = "kylem@utexas.edu"
+description="IsaacLab Extension for Nonlinear Control Theory"
+repository = "https://github.com/KyleM73/nonlinear_ct.git"
+category = "robotics"
+keywords = ["kit", "robotics", "learning", "ai"]
+
+[dependencies]
+"isaaclab" = {}
+"isaaclab_assets" = {}
+"isaaclab_tasks" = {}
+# NOTE: Add additional dependencies here
+
+[[python.module]]
+name = "nonlinear_ct"
