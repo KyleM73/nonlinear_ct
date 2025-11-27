@@ -115,7 +115,7 @@ class DynamicsEnvCfg(ManagerBasedRLEnvCfg):
     """Configuration for the point mass environment."""
 
     # Scene settings
-    viewer: ViewerCfg = ViewerCfg(eye=(0.0, 0.0, 3.0), origin_type="env", env_index=0)
+    viewer: ViewerCfg = ViewerCfg(eye=(0.0, 0.0, 5.0), origin_type="env", env_index=0)
     scene: SceneCfg = SceneCfg(num_envs=8192, env_spacing=5.0)
     # Basic settings
     observations: ObservationsCfg = ObservationsCfg()
