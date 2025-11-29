@@ -9,3 +9,13 @@ gym.register(
         "rsl_rl_cfg_entry_point": f"{__name__}.ppo_cfg:PointMassPPORunnerCfg",
     },
 )
+
+gym.register(
+    id="point-mass-play-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.point_mass_cfg:TestDynamicsEnvCfg",
+        "rsl_rl_cfg_entry_point": f"{__name__}.ppo_cfg:PointMassPPORunnerCfg",
+    },
+)

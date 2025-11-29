@@ -56,9 +56,9 @@ class ObservationsCfg:
     @configclass
     class PolicyCfg(ObsGroup):
         """Observations for policy group."""
-        pose = ObsTerm(func=task_mdp.body_pos_w, params={
+        pose = ObsTerm(func=task_mdp.body_pos_w, noise=Unoise(n_min=-0.01, n_max=0.01), params={
             "asset_cfg": SceneEntityCfg("robot", body_names="end_effector")})
-        velocity = ObsTerm(func=task_mdp.body_vel_w, params={
+        velocity = ObsTerm(func=task_mdp.body_vel_w, noise=Unoise(n_min=-0.1, n_max=0.1), params={
             "asset_cfg": SceneEntityCfg("robot", body_names="end_effector")})
         # last_action = ObsTerm(mdp.last_action)
     
@@ -81,6 +81,26 @@ class EventCfg:
         params={
             "position_range": (-2.0, 2.0),
             "velocity_range": (-1.0, 1.0),
+        },
+    )
+
+@configclass
+class TestEventCfg:
+    """Configuration for events."""
+
+    # reset
+    reset_base = EventTerm(
+        func=mdp.reset_root_state_uniform,
+        mode="reset",
+        params={"pose_range": {}, "velocity_range": {}},
+    )
+
+    reset_joints = EventTerm(
+        func=mdp.reset_joints_by_offset,
+        mode="reset",
+        params={
+            "position_range": (1.0, 1.0),
+            "velocity_range": (-0.0, 0.0),
         },
     )
 
@@ -135,3 +155,7 @@ class DynamicsEnvCfg(ManagerBasedRLEnvCfg):
         # simulation settings
         self.sim.dt = 0.02
         self.sim.render_interval = self.decimation
+
+@configclass
+class TestDynamicsEnvCfg(DynamicsEnvCfg):
+    events: TestEventCfg = TestEventCfg()

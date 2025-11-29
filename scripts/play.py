@@ -68,6 +68,7 @@ from robot_rl.utils import export_policy_as_jit
 
 import nonlinear_ct.tasks # noqa: F401
 import isaaclab_tasks  # noqa: F401
+from isaaclab.assets import Articulation
 from isaaclab.envs import ManagerBasedRLEnvCfg
 from isaaclab.utils.assets import retrieve_file_path
 from isaaclab.utils.dict import print_dict
@@ -157,6 +158,13 @@ def main(env_cfg: ManagerBasedRLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
     if args_cli.export and resume_path is not None:
         export_model_dir = os.path.join(os.path.dirname(resume_path), "exported")
         export_policy_as_jit(policy_nn, normalizer=normalizer, path=export_model_dir, filename="policy_jit.pt")
+        limits_path = os.path.join(export_model_dir, "policy_limits.pt")
+        asset: Articulation = env.unwrapped.scene["robot"]
+        pos_limits = asset.data.joint_pos_limits
+        vel_limits = asset.data.joint_vel_limits
+        effort_limits = asset.data.joint_effort_limits
+        limits = {"pos": pos_limits, "vel": vel_limits, "effort": effort_limits}
+        torch.save(limits, limits_path)
         msg = ""
         msg += str(env.unwrapped.action_manager) # type: ignore
         msg += "\n"

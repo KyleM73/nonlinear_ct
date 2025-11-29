@@ -3,36 +3,39 @@ import numpy as np
 import torch
 from matplotlib.figure import Figure
 from matplotlib.axes import Axes
+plt.rcParams["text.usetex"] = True
 
-def rollout2trajectory(rollout: dict) -> tuple[torch.Tensor, torch.Tensor]:
+def rollout2trajectory(rollout: dict) -> tuple[torch.Tensor, ...]:
     obs = []
     actions = []
+    dones = []
     for timestep, data in rollout.items():
         obs.append(data["obs"].tolist())
         actions.append(data["action"].tolist())
-        # if data["done"]: break
-    return torch.tensor(obs), torch.tensor(actions)
+        dones.append(data["done"].tolist())
+    return torch.tensor(obs), torch.tensor(actions), torch.tensor(dones)
 
 def compute_jacobian(policy: torch.jit.ScriptModule, x: torch.Tensor) -> torch.Tensor:
     x = x.detach().requires_grad_(True)
-    J = torch.autograd.functional.jacobian(lambda inp: policy(inp), x)
-    return J.squeeze()
+    J_func = torch.func.jacrev(lambda inp: policy(inp))
+    J = torch.func.vmap(J_func)(x)
+    return J.detach().squeeze(dim=1)
+
+def compute_hessian(policy: torch.jit.ScriptModule, x: torch.Tensor) -> torch.Tensor:
+    x = x.detach().requires_grad_(True)
+    H_func = torch.func.hessian(lambda inp: policy(inp))
+    H = torch.func.vmap(H_func)(x)
+    return H.detach().squeeze(dim=1)
 
 def compute_sensitivity(
     policy: torch.jit.ScriptModule,
     states: torch.Tensor,
     device: str | torch.device = "cpu",
 ) -> tuple[torch.Tensor, ...]:
-    batch_size = states.shape[0]
-    state_dim = states.shape[1]
     policy = policy.to(device)
     states = states.to(device)
-    C = torch.zeros(state_dim, state_dim, device=device)
-    for i in range(batch_size):
-        x = states[i]
-        J = compute_jacobian(policy, x)
-        C += J.T @ J
-    C = C.cpu() / batch_size
+    J = compute_jacobian(policy, states)
+    C = torch.bmm(J.transpose(1, 2), J).mean(dim=0).cpu()
     # ascending
     eigvals, eigvecs = torch.linalg.eigh(C)
     # descending
@@ -49,20 +52,13 @@ def compute_multistep_sensitivity(
     states: torch.Tensor,
     device: str | torch.device = "cpu",
 ) -> tuple[torch.Tensor, ...]:
-    H = states.shape[0]
     policy = policy.to(device)
     states = states.to(device)
-    C_list = []
-    eig_list = []
-    for i in range(H):
-        x = states[i]
-        J = compute_jacobian(policy, x)
-        C = J.T @ J
-        eigvals = torch.linalg.eigvalsh(C)
-        eigvals = eigvals.flip(0)
-        C_list.append(C.tolist())
-        eig_list.append(eigvals.tolist())
-    return torch.tensor(C_list), torch.tensor(eig_list)
+    J = compute_jacobian(policy, states)
+    C = torch.bmm(J.transpose(1, 2), J).cpu()
+    eigvals = torch.linalg.eigvalsh(C)
+    eigvals = eigvals.flip(1)
+    return C, eigvals
 
 def compute_batch_multistep_sensitivity(
     policy: torch.jit.ScriptModule,
@@ -70,13 +66,58 @@ def compute_batch_multistep_sensitivity(
     device: str | torch.device = "cpu",
 ) -> tuple[torch.Tensor, ...]:
     T, N, dim = states.shape
-    C_tensor = torch.zeros(T, N, dim, dim)
-    eig_tensor = torch.zeros(T, N, dim)
-    for i in range(N):
-        C, eig = compute_multistep_sensitivity(policy, states[:, i].squeeze(), device)
-        C_tensor[:, i] = C
-        eig_tensor[:, i] = eig
-    return C_tensor, eig_tensor
+    x = states.reshape(T * N, dim)
+    C, eig = compute_multistep_sensitivity(policy, x, device)
+    return C.view(T, N, dim, dim), eig.view(T, N, dim)
+
+def compute_perturbation_error(
+    policy: torch.jit.ScriptModule,
+    states: torch.Tensor,
+    eigenvectors: torch.Tensor,
+    radii: list[float],
+    env_idx: int = 0,
+) -> tuple[torch.Tensor, ...]:
+    n_eig = eigenvectors.shape[1]
+    T = states.shape[0]
+
+    errors = torch.zeros(n_eig, len(radii), T)
+    errors_lin = torch.zeros_like(errors)
+
+    for i in range(n_eig):
+        v = eigenvectors[:, i]
+        for j, a in enumerate(radii):
+            a = radii[j]
+            x = states[:, env_idx].squeeze()
+            with torch.no_grad():
+                diff = policy(x + a * v) - policy(x)
+            errors[i, j] = diff.norm(dim=1)
+            J = compute_jacobian(policy, x)
+            errors_lin[i, j] = a * (J @ v).norm(dim=1)
+    return errors, errors_lin
+
+def compute_batch_perturbation_error(
+    policy: torch.jit.ScriptModule,
+    states: torch.Tensor,
+    eigenvectors: torch.Tensor,
+    radii: list[float],
+) -> tuple[torch.Tensor, ...]:
+    n_eig = eigenvectors.shape[1]
+    dim = states.shape[-1]
+
+    errors = torch.zeros(n_eig, len(radii))
+    errors_lin = torch.zeros_like(errors)
+
+    for i in range(n_eig):
+        v = eigenvectors[:, i]
+        for j, a in enumerate(radii):
+            a = radii[j]
+            x = states.reshape(-1, dim)
+            with torch.no_grad():
+                diff = policy(x + a * v) - policy(x)
+            errors[i, j] = diff.norm(dim=1).mean(dim=0)
+            J = compute_jacobian(policy, x)
+            errors_lin[i, j] = a * (J @ v).norm(dim=1).mean(dim=0)
+    return errors, errors_lin
 
 def plot_matrix(matrix: torch.Tensor, title: str) -> None:
     dim = matrix.shape[0]
@@ -105,6 +146,7 @@ def plot_1d(
     xlabel: str,
     ylabel: str,
     grid: bool = True,
+    log: bool = False,
 ) -> None:
     fig, ax = plt.subplots()
     ax.plot(data, marker="o", linewidth=2)
@@ -112,6 +154,8 @@ def plot_1d(
     ax.set_xticks(np.arange(data.shape[0]))
     ax.set_xlabel(f"{xlabel}")
     ax.set_ylabel(f"{ylabel}")
+    if log:
+        ax.set_yscale("log")
     ax.grid(grid)
     fig.show()
 
@@ -188,6 +232,38 @@ def plot_multistep_sensitivity(
     fig.tight_layout()
     fig.show()
     
+def plot_perturbation_error(
+    errors: torch.Tensor,
+    errors_linear: torch.Tensor,
+    eigenvectors: torch.Tensor,
+    radii: list[float],
+    log: bool = True,
+) -> None:
+    n_eig = eigenvectors.shape[1]
+
+    fig, axes = plt.subplots(n_eig, 1, figsize=(10, 2.5 * max(1, n_eig)), sharex=True)
+    if n_eig == 1:
+        axes = [axes]
+    for i, ax in enumerate(axes):
+        handles = []
+        labels = []
+        for j, a in enumerate(radii):
+            line, = ax.plot(errors[i, j], linewidth=2, label=f"a={a}")
+            handles.append(line)
+            labels.append(f"a={a}")
+            ax.plot(errors_linear[i, j], linewidth=2, linestyle="--", color=line.get_color())
+        if log:
+            ax.set_yscale("log")
+        ax.set_ylabel("Error")
+        ax.set_title(f"Eigenvector {i}")
+        ax.grid(True)
+        # legend shows only solid (nonlinear) curves
+        # ax.legend(handles, labels, ncol=min(4, len(radii)), loc="best")
+
+    axes[-1].set_xlabel("Time [Step]")
+    fig.tight_layout()
+    fig.show()
+
 
 def plot_2d(trajectory: torch.Tensor) -> tuple[Figure, Axes]:
     fig, ax = plt.subplots()
