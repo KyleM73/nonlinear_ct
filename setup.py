@@ -37,6 +37,7 @@ INSTALL_REQUIRES = [
     "junitparser",
     "flatdict==4.0.1",
     "flaky",
+    "matplotlib",
 ]
 
 PYTORCH_INDEX_URL = ["https://download.pytorch.org/whl/cu128"]

@@ -1,9 +1,11 @@
 import matplotlib.pyplot as plt
-import numpy as np
-import torch
 from matplotlib.figure import Figure
 from matplotlib.axes import Axes
 plt.rcParams["text.usetex"] = True
+
+import numpy as np
+import torch
+
 
 def rollout2trajectory(rollout: dict) -> tuple[torch.Tensor, ...]:
     obs = []
@@ -138,7 +140,7 @@ def plot_matrix(matrix: torch.Tensor, title: str) -> None:
             )
     ax.set_title(f"{title}")
     fig.tight_layout()
-    fig.show()
+    # fig.show()
 
 def plot_1d(
     data: torch.Tensor,
@@ -157,7 +159,7 @@ def plot_1d(
     if log:
         ax.set_yscale("log")
     ax.grid(grid)
-    fig.show()
+    # fig.show()
 
 def plot_semilogy(
     data: torch.Tensor,
@@ -173,7 +175,7 @@ def plot_semilogy(
     ax.set_xlabel(f"{xlabel}")
     ax.set_ylabel(f"{ylabel}")
     ax.grid(grid)
-    fig.show()
+    # fig.show()
 
 def plot_multistep_sensitivity(
     C_data: torch.Tensor,
@@ -230,7 +232,7 @@ def plot_multistep_sensitivity(
     )
 
     fig.tight_layout()
-    fig.show()
+    # fig.show()
     
 def plot_perturbation_error(
     errors: torch.Tensor,
@@ -262,7 +264,7 @@ def plot_perturbation_error(
 
     axes[-1].set_xlabel("Time [Step]")
     fig.tight_layout()
-    fig.show()
+    # fig.show()
 
 
 def plot_2d(trajectory: torch.Tensor) -> tuple[Figure, Axes]:

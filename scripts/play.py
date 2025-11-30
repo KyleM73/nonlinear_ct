@@ -63,8 +63,7 @@ import os
 import time
 import torch
 
-from robot_rl.runners import DistillationRunner, OnPolicyRunner
-from robot_rl.utils import export_policy_as_jit
+from rsl_rl.runners import DistillationRunner, OnPolicyRunner
 
 import nonlinear_ct.tasks # noqa: F401
 import isaaclab_tasks  # noqa: F401
@@ -75,6 +74,7 @@ from isaaclab.utils.dict import print_dict
 from isaaclab_rl.rsl_rl import RslRlBaseRunnerCfg, RslRlVecEnvWrapper
 from isaaclab_tasks.utils import get_checkpoint_path
 from isaaclab_tasks.utils.hydra import hydra_task_config
+from isaaclab_rl.rsl_rl import export_policy_as_jit
 
 
 @hydra_task_config(args_cli.task, args_cli.agent)

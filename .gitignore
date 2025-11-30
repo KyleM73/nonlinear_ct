@@ -6,6 +6,7 @@ resources/
 wandb/
 # **.pdf
 # **.png
+.venv/
 
 # Core LaTeX auxiliary files
 *.aux
