@@ -68,7 +68,7 @@ from datetime import datetime
 
 import omni
 
-from robot_rl.runners import DistillationRunner, OnPolicyRunner
+from rsl_rl.runners import DistillationRunner, OnPolicyRunner
 
 import nonlinear_ct.tasks  # noqa: F401
 import isaaclab_tasks  # noqa: F401
