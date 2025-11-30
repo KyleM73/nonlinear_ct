@@ -2,8 +2,51 @@
 *.egg-info
 logs/
 outputs/
-**artifacts/
 resources/
 wandb/
-**.pdf
-**.png
+# **.pdf
+# **.png
+
+# Core LaTeX auxiliary files
+*.aux
+*.lof
+*.log
+*.lot
+*.fls
+*.out
+*.toc
+*.fmt
+*.fot
+*.cb
+*.cb2
+*.lb
+
+# BibTeX/BibLaTeX auxiliary files
+*.bbl
+*.blg
+*.acn
+*.acr
+*.alg
+*.glg
+*.gls
+*.ilg
+*.ind
+*.ist
+
+# DVI/PDF/SyncTeX files
+*.dvi
+*.pdf # Consider if you want to track the final PDF or not
+*.synctex.gz
+*.synctex.gz(busy)
+
+# LaTeXmk specific files
+*.fdb_latexmk
+*.fls
+
+# Other common temporary files
+*.maf
+*.mtc
+*.mtc1
+*.nav
+*.snm
+*.vrb
