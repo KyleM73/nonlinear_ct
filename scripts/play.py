@@ -76,7 +76,7 @@ from isaaclab_tasks.utils import get_checkpoint_path
 from isaaclab_tasks.utils.hydra import hydra_task_config
 from isaaclab_rl.rsl_rl import export_policy_as_jit
 
-from .exporter import export_critic_as_jit
+from exporter import export_critic_as_jit
 
 
 @hydra_task_config(args_cli.task, args_cli.agent)
