@@ -25,6 +25,94 @@ def rollout2trajectory(rollout: dict) -> tuple[torch.Tensor, ...]:
         torch.tensor(critic_obs), torch.tensor(values),
     )
 
+def subsample(
+    *tensors: torch.Tensor,
+    method: Literal["random", "farthest_point"] = "random",
+    n_samples: int | None = None,
+    min_dist: float | None = None,
+    seed: int = 0,
+    presample: int | None = None,
+    device: str | torch.device = "cpu",
+) -> tuple[torch.Tensor, ...]:
+    """Subsample tensors to reduce density for plotting.
+
+    Args:
+        *tensors: Tensors to subsample (must have same first dimension).
+        method: "random" for uniform random sampling, "farthest_point" for
+            farthest point sampling which maintains spatial coverage.
+        n_samples: Target number of samples (used by both methods).
+        min_dist: Minimum distance between points (only used by farthest_point).
+            If provided, overrides n_samples for farthest_point method.
+        seed: Random seed for reproducibility.
+        presample: For farthest_point, randomly presample to this size first
+            to speed up computation on very large datasets. Default: 10 * n_samples.
+        device: Device for distance computation ("cpu" or "cuda").
+
+    Returns:
+        Tuple of subsampled tensors with the same ordering.
+    """
+    n_total = tensors[0].shape[0]
+    torch.manual_seed(seed)
+
+    if method == "random":
+        n_samples = n_samples or n_total // 10
+        n_samples = min(n_samples, n_total)
+        indices = torch.randperm(n_total)[:n_samples]
+
+    elif method == "farthest_point":
+        n_samples = n_samples or n_total // 10
+        n_samples = min(n_samples, n_total)
+
+        # Presample for speed on large datasets
+        presample = presample or min(n_total, 10 * n_samples)
+        if presample < n_total:
+            presample_idx = torch.randperm(n_total)[:presample]
+            working_tensors = tuple(t[presample_idx] for t in tensors)
+            n_working = presample
+        else:
+            presample_idx = None
+            working_tensors = tensors
+            n_working = n_total
+
+        # Use first tensor for distance computation
+        coords = working_tensors[0]
+        if coords.dim() == 1:
+            coords = coords.unsqueeze(1)
+        coords = coords.to(device)
+
+        # Initialize
+        selected = [torch.randint(n_working, (1,)).item()]
+        min_distances = torch.full((n_working,), float("inf"), device=device)
+
+        while True:
+            # Update minimum distances
+            last_selected = coords[selected[-1]]
+            dists = (coords - last_selected).norm(dim=-1)
+            min_distances = torch.minimum(min_distances, dists)
+
+            # Check stopping criteria
+            if min_dist is not None:
+                if min_distances.max() < min_dist:
+                    break
+            elif len(selected) >= n_samples:
+                break
+
+            # Select farthest point
+            next_idx = min_distances.argmax().item()
+            selected.append(next_idx)
+
+        indices = torch.tensor(selected)
+
+        # Map back to original indices if presampled
+        if presample_idx is not None:
+            indices = presample_idx[indices]
+
+    else:
+        raise ValueError(f"Unknown method: {method}")
+
+    return tuple(t[indices] for t in tensors)
+
+
 def compute_state_statistics(x: torch.Tensor, decimals: int = 4) -> None:
     dim = x.shape[-1]
     x = x.view(-1, dim)
@@ -32,6 +120,33 @@ def compute_state_statistics(x: torch.Tensor, decimals: int = 4) -> None:
         mean = x[..., i].mean(dim=0).item()
         std = x[..., i].std(dim=0).item()
         print(f"State {i}: mean {mean:.{decimals}f} std {std:.{decimals}f}")
+
+def compute_dense_samples(rollout: torch.Tensor, n_grid: int = 100, mode: Literal["point_mass"] = "point_mass") -> tuple[torch.Tensor, ...]:
+    if mode == "point_mass":
+        dim = rollout.shape[-1]
+        states = torch.zeros(n_grid * n_grid, dim)
+        x_vals = torch.linspace(-1.0, 1.0, n_grid)
+        y_vals = torch.linspace(-1.0, 1.0, n_grid)
+        xx, yy = torch.meshgrid(x_vals, y_vals, indexing="xy")
+        vx_vals = torch.linspace(-1.0, 1.0, n_grid)
+        vy_vals = torch.linspace(-1.0, 1.0, n_grid)
+        vxx, vyy = torch.meshgrid(vx_vals, vy_vals, indexing="xy")
+
+        states[:, 0] = xx.flatten()
+        states[:, 1] = yy.flatten()
+        states[:, 2] = vxx.flatten()
+        states[:, 3] = vyy.flatten()
+    return states, xx.flatten(), yy.flatten()
+
+def compute_eigenbasis_samples(eigenvectors: torch.Tensor, n_grid: int = 100) -> tuple[torch.Tensor, ...]:
+    v1, v2 = eigenvectors[:, 0], eigenvectors[:, 1]
+
+    alpha_vals = torch.linspace(-1.0, 1.0, n_grid)
+    beta_vals = torch.linspace(-1.0, 1.0, n_grid)
+    aa, bb = torch.meshgrid(alpha_vals, beta_vals, indexing="xy")
+
+    states = aa.flatten().unsqueeze(1) * v1 + bb.flatten().unsqueeze(1) * v2
+    return states, aa.flatten(), bb.flatten()
 
 def compute_jacobian(policy: torch.jit.ScriptModule, x: torch.Tensor) -> torch.Tensor:
     x = x.detach().requires_grad_(True)
@@ -161,7 +276,7 @@ def compute_projection_distances(states, eigenvectors, mean_center=True) -> torc
     else:
         x = states
 
-    proj_dist = torch.einsum("...s,ss->...s", x, eigenvectors)
+    proj_dist = torch.einsum("...s,...ss->...s", x, eigenvectors)
     return proj_dist
 
 def compute_linearization(
@@ -216,6 +331,52 @@ def plot_matrix(matrix: torch.Tensor, title: str, normalize: bool = False) -> No
     ax.set_title(f"{title}"+title_norm)
     # fig.tight_layout()
     # fig.show()
+
+def plot_heatmap(
+    x_coords: torch.Tensor,
+    y_coords: torch.Tensor,
+    values: torch.Tensor,
+    title: str,
+    xlabel: str,
+    ylabel: str,
+    cbar_label: str,
+    level_sets: list[float] | None = None,
+    use_scatter: bool = False,
+    size: int = 10,
+) -> None:
+    """Core heatmap plotting function."""
+    fig, ax = plt.subplots()
+
+    # Compute symmetric extent
+    lim_min = min(x_coords.min().item(), y_coords.min().item())
+    lim_max = max(x_coords.max().item(), y_coords.max().item())
+
+    if use_scatter:
+        sc = ax.scatter(x_coords.numpy(), y_coords.numpy(), c=values.numpy(), cmap="viridis", s=size)
+        ax.figure.colorbar(sc, ax=ax, label=cbar_label)
+        if level_sets is not None:
+            ax.tricontour(
+                x_coords.numpy(), y_coords.numpy(), values.numpy(),
+                levels=level_sets, colors="white", linewidths=1.5,
+            )
+    else:
+        n_grid = int(values.numel() ** 0.5)
+        values_grid = values.reshape(n_grid, n_grid)
+        xx = x_coords.reshape(n_grid, n_grid)
+        yy = y_coords.reshape(n_grid, n_grid)
+        extent = [lim_min, lim_max, lim_min, lim_max]
+        im = ax.imshow(values_grid.T.numpy(), origin="lower", extent=extent, cmap="viridis", aspect="equal")
+        ax.figure.colorbar(im, ax=ax, label=cbar_label)
+        if level_sets is not None:
+            cs = ax.contour(xx.numpy(), yy.numpy(), values_grid.T.numpy(), levels=level_sets, colors="white", linewidths=1.5)
+            ax.clabel(cs, inline=True, fontsize=10, fmt="%.2f")
+
+    ax.set_xlim(lim_min, lim_max)
+    ax.set_ylim(lim_min, lim_max)
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel(ylabel)
+    ax.set_title(title)
+    ax.set_aspect("equal")
 
 def plot_1d(
     data: torch.Tensor,
