@@ -76,6 +76,8 @@ from isaaclab_tasks.utils import get_checkpoint_path
 from isaaclab_tasks.utils.hydra import hydra_task_config
 from isaaclab_rl.rsl_rl import export_policy_as_jit
 
+from .exporter import export_critic_as_jit
+
 
 @hydra_task_config(args_cli.task, args_cli.agent)
 def main(env_cfg: ManagerBasedRLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
@@ -142,6 +144,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
 
     # obtain the trained policy for inference
     policy = runner.get_inference_policy(device=env.unwrapped.device)
+    critic = runner.alg.policy.evaluate
 
     # extract the neural network module
     policy_nn = runner.alg.policy
@@ -153,11 +156,16 @@ def main(env_cfg: ManagerBasedRLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
         normalizer = policy_nn.student_obs_normalizer
     else:
         normalizer = None
+    if hasattr(policy_nn, "critic_obs_normalizer"):
+        critic_normalizer = policy_nn.critic_obs_normalizer
+    else:
+        critic_normalizer = None
 
     # export as jit
     if args_cli.export and resume_path is not None:
         export_model_dir = os.path.join(os.path.dirname(resume_path), "exported")
         export_policy_as_jit(policy_nn, normalizer=normalizer, path=export_model_dir, filename="policy_jit.pt")
+        export_critic_as_jit(policy_nn, normalizer=critic_normalizer, path=export_model_dir, filename="critic_jit.pt")
         limits_path = os.path.join(export_model_dir, "policy_limits.pt")
         asset: Articulation = env.unwrapped.scene["robot"]
         pos_limits = asset.data.joint_pos_limits
@@ -188,9 +196,12 @@ def main(env_cfg: ManagerBasedRLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
         with torch.inference_mode():
             # agent stepping
             actions = policy(obs)
+            values = critic(obs)
             obs_dict[timestep] = {
                 "obs": obs["policy"].cpu(),
                 "action": actions.cpu(),
+                "critic_obs": obs.get("critic", obs["policy"]).cpu(),
+                "value": values.cpu(),
             }
             # env stepping
             obs, _, dones, _ = env.step(actions)
