@@ -12,11 +12,18 @@ def rollout2trajectory(rollout: dict) -> tuple[torch.Tensor, ...]:
     obs = []
     actions = []
     dones = []
+    values = []
+    critic_obs = []
     for timestep, data in rollout.items():
         obs.append(data["obs"].tolist())
         actions.append(data["action"].tolist())
         dones.append(data["done"].tolist())
-    return torch.tensor(obs), torch.tensor(actions), torch.tensor(dones)
+        critic_obs.append(data["critic_obs"].tolist())
+        values.append(data["value"].tolist())
+    return (
+        torch.tensor(obs), torch.tensor(actions), torch.tensor(dones),
+        torch.tensor(critic_obs), torch.tensor(values),
+    )
 
 def compute_state_statistics(x: torch.Tensor, decimals: int = 4) -> None:
     dim = x.shape[-1]
@@ -184,7 +191,12 @@ def compute_linearization(
             return ground_truth, u0 + alpha * Jv + alpha ** 2 * vHv / 2
 
 
-def plot_matrix(matrix: torch.Tensor, title: str) -> None:
+def plot_matrix(matrix: torch.Tensor, title: str, normalize: bool = False) -> None:
+    if normalize:
+        matrix /= matrix.sum() + 1e-6
+        title_norm = ", Normalized"
+    else:
+        title_norm = ""
     dim = matrix.shape[0]
     fig, ax = plt.subplots()
     im = ax.imshow(matrix, cmap="viridis", interpolation="nearest")
@@ -201,7 +213,7 @@ def plot_matrix(matrix: torch.Tensor, title: str) -> None:
                 ha="center", va="center",
                 color=text_color, fontsize=12 if dim < 15 else 8,
             )
-    ax.set_title(f"{title}")
+    ax.set_title(f"{title}"+title_norm)
     # fig.tight_layout()
     # fig.show()
 
