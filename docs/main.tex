@@ -26,8 +26,8 @@
 %\usepackage{epsfig} % for postscript graphics files
 %\usepackage{mathptmx} % assumes new font selection scheme installed
 %\usepackage{times} % assumes new font selection scheme installed
-%\usepackage{amsmath} % assumes amsmath package installed
-%\usepackage{amssymb}  % assumes amsmath package installed
+\usepackage{amsmath} % assumes amsmath package installed
+\usepackage{amssymb}  % assumes amsmath package installed
 
 \title{\LARGE \bf Sensitivity Analysis for Neural Network Controllers}
 
@@ -61,7 +61,67 @@
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 \section{INTRODUCTION}
 
+Reinforcement learning (RL) has become the standard control technique in legged locomotion due to its robustness, expressivity, and ease of deployment.
+Despite these attributes, RL control policies still fail catastrophically when evaluated on out of distribution (OOD) inputs.
+Due to the black box nature of RL policies, safety efforts largely focus on observing potentially destabilizing changes in the action space of the policy, and triggering safe modes when risk thresholds are reached (e.g. over-current protection).
+Efforts to quantify the distribution of valid inputs during training may result in more proactive runtime anomaly detection, but such efforts provide only weak guarantees of stability given the distribution shift between simulation-based training and hardware deployment.
+In this work we propose a more rigorous treatment of anomaly detection using tools from nonlinear sensitivity analysis.
+Treating the trained policy as an artifact, we aim to exploit the structure of the learning-based controller to provide stronger guarantees to prevent catastrophic failure at runtime.
+
 \section{SYSTEM MODELING}
+
+Consider a nonlinear, time varying system
+\begin{equation}
+\dot x_t = f(x_t) + g(x_t)u_t
+\end{equation}
+with state $x_t\in\mathbb{R}^m$ and control signal $u_t\in\mathbb{R}^n$.
+We seek to understand the sensitivity of the closed loop dynamics without assuming knowledge of $f$ or $g$.
+Let $u_t = \pi(z_t)$ be the output from a neural network controller tracking a reference signal such that the error dynamics
+\begin{equation}
+\begin{split}
+z_t &:=x_t-x^\text{ref}_t \\
+\dot z_t &= F(z_t, \pi(z_t))
+\end{split}
+\end{equation}
+has an equilibrium at $F(0,\pi(0))=0\forall t$.
+The linearized closed loop system Jacobian
+\begin{equation}
+J_\text{cl} = \frac{\partial F}{\partial z_t}\bigg\vert_{z_t=0} 
+\end{equation}
+and can be estimated as follows:
+
+For $k=1,...,N$ select perturbation direction $d^{(k)}\in\mathbb{R}^n$ with $||d^{(k)}||=1$ and radius $h\in\mathbb{R}$.
+Then define the finite difference
+\begin{equation}
+y^{(k)} := \frac{F(hd^{(k)})-F(-hd^{(k)})}{2h}
+\end{equation}
+with estimator $y^{(k)}=J_\text{cl}d^{(k)}+\epsilon^{(k)}$, $\epsilon^{(k)}\sim\mathcal{N}(0,\Sigma)$.
+Let $Y=[y^{(1)},...,y^{(N)}]\in\mathbb{R}^{n\times N}$, $D=[d^{(1)},...,d^{(N)}]\in\mathbb{R}^{n\times N}$ and $E=[\epsilon^{(1)},...,\epsilon^{(N)}]\in\mathbb{R}^{n\times N}$.
+Then, 
+\begin{equation}
+\begin{split}
+Y&=J_\text{cl} D+E \\
+\hat J_\text{cl} &= YD^T(DD^T)^{-1}
+\end{split}
+\end{equation}
+if $DD^T$ is invertible (i.e. $\{d^{(k)}\}$ spans $\mathbb{R}^n$).
+A valid choice of $\{d^{(k)}\}$ requires $N\geq n$.
+
+
+
+Divergence happens near singularity of open loop dynamics and sensitive regions of policy
+
+Show with $M\ddot q = \tau$
+
+Assume not near singularity
+
+Then sensitive only if policy is sensitive
+
+Do policy analysis
+
+
+
+
 
 \section{SYSTEM ANALYSIS AND DESIGN}
 

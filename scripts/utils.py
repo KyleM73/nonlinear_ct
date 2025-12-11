@@ -391,11 +391,16 @@ def plot_1d(
     linewidth: int = 2,
     marker: str = "",
     prefix: str = "",
+    labels: tuple[str, ...] | None = None,
 ) -> None:
     fig, ax = plt.subplots()
     if len(data.shape) > 1:
         for k in range(data.shape[1]):
-            ax.plot(data[:, k], marker=marker, linewidth=linewidth, label=prefix+str(k+1))
+            if labels is not None:
+                label = f"{prefix}{labels[k]}"
+            else:
+                label = f"{prefix}{str(k+1)}"
+            ax.plot(data[:, k], marker=marker, linewidth=linewidth, label=label)
         ax.legend()
     else:
         ax.plot(data, marker=marker, linewidth=linewidth)
@@ -431,7 +436,7 @@ def plot_2d(
     fig, ax = plt.subplots()
     if temporal:
         n_points = data.shape[0]
-        if n_points > 100:
+        if n_points > 1000:
             step = n_points // 100
             indices = torch.arange(0, n_points, step)
             data = data[indices]
@@ -565,3 +570,156 @@ def plot_projection_distances(proj, num_vectors=4) -> None:
     ax.grid(True)
     # fig.tight_layout()
     # plt.show()
+
+
+def compute_subspace_alignment(
+    global_eigvecs: torch.Tensor,
+    local_eigvecs: torch.Tensor,
+) -> torch.Tensor:
+    """Compute alignment between global and local eigenvector bases over time.
+
+    Args:
+        global_eigvecs: Global eigenvectors, shape (dim, dim) with columns as eigenvectors.
+        local_eigvecs: Local eigenvectors, shape (T, dim, dim) with columns as eigenvectors.
+
+    Returns:
+        Alignment matrix of shape (T, dim, dim) where entry [t, i, j] is |<v_global_i, v_local_j(t)>|^2.
+    """
+    # global_eigvecs: (dim, dim) -> columns are eigenvectors
+    # local_eigvecs: (T, dim, dim) -> columns are eigenvectors
+    # Compute dot products: (T, dim, dim) where [t, i, j] = v_global_i · v_local_j(t)
+    alignment = torch.einsum("ij,tik->tjk", global_eigvecs, local_eigvecs)
+    return alignment.square()
+
+
+def plot_subspace_alignment(
+    alignment: torch.Tensor,
+    title: str = "Subspace Alignment",
+    grid: bool = True,
+) -> None:
+    """Plot alignment between global and local eigenvector bases over time.
+
+    Shows how much each local eigenvector aligns with each global eigenvector.
+    Perfect alignment with global eigenvector i means row i has value 1.0 in one column.
+
+    Args:
+        alignment: Alignment matrix of shape (T, dim, dim) from compute_subspace_alignment.
+        title: Plot title.
+        grid: Whether to show grid.
+    """
+    T, dim, _ = alignment.shape
+
+    fig, axes = plt.subplots(dim, 1, figsize=(10, 2.5 * dim), sharex=True)
+    if dim == 1:
+        axes = [axes]
+
+    for i, ax in enumerate(axes):
+        for j in range(dim):
+            ax.plot(alignment[:, i, j], linewidth=2, label=rf"$|v_{{{i+1}}}^G \cdot v_{{{j+1}}}^L|^2$")
+        ax.set_ylabel(rf"Alignment with $v_{{{i+1}}}^G$")
+        ax.set_ylim(-0.05, 1.05)
+        ax.legend(loc="right", ncol=1, fontsize=8)
+        ax.grid(grid)
+
+    axes[-1].set_xlabel("Time (Step)")
+    fig.suptitle(title)
+    fig.tight_layout()
+
+import torch
+
+def compute_subspace_similarity(
+        vecs_A: torch.Tensor,
+        vals_A: torch.Tensor,
+        vecs_B: torch.Tensor,
+        vals_B: torch.Tensor,
+        k: int,
+) -> tuple[torch.Tensor, ...]:
+    """
+    Computes subspace similarity between a single basis A and a batch of bases B.
+    Returns both Geometric (unweighted) and Energetic (weighted) scores.
+    
+    Args:
+        vecs_A (Tensor): (N, N) Eigenvectors of A.
+        vals_A (Tensor): (N,) Eigenvalues of A (sorted descending).
+        vecs_B (Tensor): (Batch, N, N) Eigenvectors of B.
+        vals_B (Tensor): (Batch, N) Eigenvalues of B (sorted descending).
+        k (int): Number of top components to compare.
+        
+    Returns:
+        tuple: (geometric_scores, energetic_scores)
+               - geometric_scores: Tensor of shape (Batch,) with values in [0, 1]
+               - energetic_scores: Tensor of shape (Batch,) with values in [0, 1]
+    """
+    N = vecs_A.shape[0]
+    B_dim = vecs_B.shape[0]
+    k = min(k, N)
+    
+    # 1. Slice the top k components
+    # A shapes: Vecs (N, k), Vals (k,)
+    sub_vecs_A = vecs_A[:, :k]
+    sub_vals_A = vals_A[:k]
+    
+    # B shapes: Vecs (Batch, N, k), Vals (Batch, k)
+    sub_vecs_B = vecs_B[:, :, :k]
+    sub_vals_B = vals_B[:, :k]
+    
+    # ====================================================
+    # Metric 1: Geometric Score (Unweighted Subspace Overlap)
+    # ====================================================
+    
+    # Perform QR to ensure we have a clean orthonormal basis for the subspace
+    # even if the input vectors were linearly dependent or defective.
+    # Q_A: (N, k)
+    Q_A, _ = torch.linalg.qr(sub_vecs_A, mode="reduced")
+    
+    # Q_B: (Batch, N, k) - Batched QR
+    Q_B, _ = torch.linalg.qr(sub_vecs_B, mode="reduced")
+    
+    # Compute Interaction Matrix: Q_A^T @ Q_B
+    # We want to multiply the single matrix Q_A against every matrix in Q_B.
+    # Dimensions: (k, N) @ (Batch, N, k)
+    # PyTorch matmul broadcasting: If first arg is 2D and second is 3D, 
+    # it broadcasts the 2D arg across the batch dimension of the 3D arg.
+    # Result: (Batch, k, k)
+    interaction_geo = torch.matmul(Q_A.T, Q_B)
+    
+    # Compute Principal Angles (Singular Values)
+    # svdvals runs in batch. Result: (Batch, k)
+    # These are the cosines of the principal angles.
+    singular_values = torch.linalg.svdvals(interaction_geo)
+    
+    # Score: Normalized sum of squared cosines
+    geo_scores = torch.sum(singular_values ** 2, dim=1) / k
+    
+    # ====================================================
+    # Metric 2: Energetic Score (Spectral Alignment)
+    # ====================================================
+    
+    # 1. Raw Interaction Matrix (Dot products of eigenvectors)
+    # Dimensions: (k, N) @ (Batch, N, k) -> (Batch, k, k)
+    # C[b, i, j] is the dot product of vector A_i and vector B_{b,j}
+    C = torch.matmul(sub_vecs_A.T, sub_vecs_B)
+    C_sq = C ** 2
+    
+    # 2. Compute Weight Grid
+    # We weight the match between A_i and B_j by |lambda_A_i * lambda_B_j|
+    # w_A: (1, k, 1)  -> View as row aligner for A (rows of C)
+    # w_B: (Batch, 1, k) -> View as col aligner for B (cols of C)
+    w_A = sub_vals_A.abs().view(1, k, 1)
+    w_B = sub_vals_B.abs().view(B_dim, 1, k)
+    
+    # Broadcast multiply to get grid of weights: (Batch, k, k)
+    weights_grid = w_A * w_B 
+    
+    # 3. Compute Similarity
+    # Numerator: Sum of (Weight * cos^2)
+    numerator = torch.sum(weights_grid * C_sq, dim=(1, 2))
+    
+    # Denominator: Normalization by Frobenius norms of the reconstructed matrices
+    # Approximation assuming approx orthonormal inputs: sqrt(sum(lambda^2))
+    norm_A = torch.sqrt(torch.sum(sub_vals_A ** 2))
+    norm_B = torch.sqrt(torch.sum(sub_vals_B ** 2, dim=1))
+    
+    energetic_scores = numerator / (norm_A * norm_B + 1e-6)
+    
+    return geo_scores, energetic_scores
