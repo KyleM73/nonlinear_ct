@@ -1,4 +1,20 @@
-"""Script to play a checkpoint if an RL agent from RSL-RL."""
+"""Script to collect stability analysis samples for Jacobian estimation.
+
+This script collects perturbation response data needed for the stability
+analysis method described in the paper. Uses parallel environments for fast
+batch sampling. For each sampled direction d on the unit sphere, it:
+1. Resets environments to states +hd, steps once, records responses (batch)
+2. Resets environments to states -hd, steps once, records responses (batch)
+3. Also records the response from the origin (0)
+
+The collected data allows estimation of:
+- Forward difference: y^(k) = (F(hd^(k)) - F(0)) / h
+- Second derivative: (F(hd^(k)) - 2F(0) + F(-hd^(k))) / h^2
+
+Usage:
+    python scripts/sample.py --task point-mass-stability-v0 --checkpoint <path> \
+        --num_samples 100 --perturbation_radius 1e-3 --seed 42
+"""
 
 """Launch Isaac Sim Simulator first."""
 
@@ -11,17 +27,18 @@ from isaaclab.app import AppLauncher
 import cli_args  # isort: skip
 
 # add argparse arguments
-parser = argparse.ArgumentParser(description="Train an RL agent with RSL-RL.")
+parser = argparse.ArgumentParser(description="Collect stability analysis samples.")
 parser.add_argument(
     "--disable_fabric", action="store_true", default=False, help="Disable fabric and use USD I/O operations."
 )
-parser.add_argument("--num_envs", type=int, default=None, help="Number of environments to simulate.")
-parser.add_argument("--task", type=str, default=None, help="Name of the task.")
+parser.add_argument("--num_envs", type=int, default=None, help="Number of environments (overrides num_samples).")
+parser.add_argument("--task", type=str, default="point-mass-stability-v0", help="Name of the task.")
 parser.add_argument(
     "--agent", type=str, default="rsl_rl_cfg_entry_point", help="Name of the RL agent configuration entry point."
 )
-parser.add_argument("--seed", type=int, default=None, help="Seed used for the environment")
-parser.add_argument("--export", action="store_true", default=False, help="Export policy with jit.")
+parser.add_argument("--seed", type=int, default=42, help="Seed used for the environment and sampling")
+parser.add_argument("--num_samples", type=int, default=100, help="Number of perturbation directions to sample (N)")
+parser.add_argument("--perturbation_radius", type=float, default=1e-3, help="Perturbation radius h")
 
 # append RSL-RL cli arguments
 cli_args.add_rsl_rl_args(parser)
@@ -53,36 +70,113 @@ sys.argv = [sys.argv[0]] + hydra_args
 
 import gymnasium as gym
 import os
-import time
 import torch
 
 from rsl_rl.runners import DistillationRunner, OnPolicyRunner
 
-import nonlinear_ct.tasks # noqa: F401
+import nonlinear_ct.tasks  # noqa: F401
 import isaaclab_tasks  # noqa: F401
 from isaaclab.assets import Articulation
 from isaaclab.envs import ManagerBasedRLEnvCfg
 from isaaclab.utils.assets import retrieve_file_path
-from isaaclab.utils.dict import print_dict
 from isaaclab_rl.rsl_rl import RslRlBaseRunnerCfg, RslRlVecEnvWrapper
 from isaaclab_tasks.utils import get_checkpoint_path
 from isaaclab_tasks.utils.hydra import hydra_task_config
-from isaaclab_rl.rsl_rl import export_policy_as_jit
 
-from exporter import export_critic_as_jit
+
+def sample_unit_sphere(n_samples: int, dim: int, seed: int, device: str = "cpu") -> torch.Tensor:
+    """Sample uniformly from the unit sphere in R^dim.
+
+    Args:
+        n_samples: Number of samples to generate.
+        dim: Dimension of the sphere.
+        seed: Random seed for reproducibility.
+        device: Device to create tensor on.
+
+    Returns:
+        Tensor of shape (n_samples, dim) with unit norm rows.
+    """
+    torch.manual_seed(seed)
+    # Sample from standard normal
+    samples = torch.randn(n_samples, dim, device=device)
+    # Normalize to unit sphere
+    samples = samples / samples.norm(dim=1, keepdim=True)
+    return samples
+
+
+def collect_batch_sample(
+    env,
+    policy,
+    joint_pos: torch.Tensor,
+    joint_vel: torch.Tensor,
+) -> dict:
+    """Collect a batch of perturbation samples using parallel environments.
+
+    Sets all environments to their respective joint states, steps once with
+    the policy, and records the observations and actions.
+
+    Args:
+        env: The wrapped environment with N parallel envs.
+        policy: The inference policy.
+        joint_pos: Target joint positions (N, num_joints).
+        joint_vel: Target joint velocities (N, num_joints).
+
+    Returns:
+        Dictionary with obs_t0, obs_t1, action, joint_t0, joint_t1 for all envs.
+    """
+    unwrapped = env.unwrapped
+
+    # Set target joint state for reset (one per environment)
+    unwrapped._target_joint_pos = joint_pos
+    unwrapped._target_joint_vel = joint_vel
+
+    # Reset all environments (triggers reset_joints_to_target event)
+    obs, _ = env.reset()
+
+    # Get robot asset for joint state readout
+    asset: Articulation = unwrapped.scene["robot"]
+
+    # Record initial state for all envs
+    obs_t0 = obs["policy"].clone()
+    joint_pos_t0 = asset.data.joint_pos.clone()
+    joint_vel_t0 = asset.data.joint_vel.clone()
+
+    # Step with policy (batched inference)
+    with torch.inference_mode():
+        action = policy(obs)
+
+    # Execute action for all envs
+    obs, _, _, _ = env.step(action)
+
+    # Record final state for all envs
+    obs_t1 = obs["policy"].clone()
+    joint_pos_t1 = asset.data.joint_pos.clone()
+    joint_vel_t1 = asset.data.joint_vel.clone()
+
+    return {
+        "obs_t0": obs_t0.cpu(),
+        "obs_t1": obs_t1.cpu(),
+        "action": action.cpu(),
+        "joint_pos_t0": joint_pos_t0.cpu(),
+        "joint_vel_t0": joint_vel_t0.cpu(),
+        "joint_pos_t1": joint_pos_t1.cpu(),
+        "joint_vel_t1": joint_vel_t1.cpu(),
+    }
 
 
 @hydra_task_config(args_cli.task, args_cli.agent)
 def main(env_cfg: ManagerBasedRLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
-    """Play with RSL-RL agent."""
+    """Collect stability analysis samples using parallel environments."""
 
     # override configurations with non-hydra CLI arguments
     agent_cfg: RslRlBaseRunnerCfg = cli_args.update_rsl_rl_cfg(agent_cfg, args_cli)
-    env_cfg.scene.num_envs = args_cli.num_envs if args_cli.num_envs is not None else env_cfg.scene.num_envs
+
+    # Number of samples = number of parallel environments
+    N = args_cli.num_envs if args_cli.num_envs is not None else args_cli.num_samples
+    env_cfg.scene.num_envs = N
 
     # set the environment seed
-    # note: certain randomizations occur in the environment initialization so we set the seed here
-    env_cfg.seed = agent_cfg.seed
+    env_cfg.seed = args_cli.seed
     env_cfg.sim.device = args_cli.device if args_cli.device is not None else env_cfg.sim.device
 
     # specify directory for logging experiments
@@ -90,6 +184,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
     log_root_path = os.path.join(log_root_path, "logs", agent_cfg.experiment_name)
     log_root_path = os.path.abspath(log_root_path)
     print(f"[INFO] Loading experiment from directory: {log_root_path}")
+
     if args_cli.checkpoint:
         resume_path = retrieve_file_path(args_cli.checkpoint)
         log_dir = os.path.dirname(resume_path)
@@ -97,16 +192,16 @@ def main(env_cfg: ManagerBasedRLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
         try:
             resume_path = get_checkpoint_path(log_root_path, agent_cfg.load_run, agent_cfg.load_checkpoint)
             log_dir = os.path.dirname(resume_path)
-        except:
+        except Exception:
             resume_path = None
             log_dir = log_root_path
-            print(f"[INFO] No checkpoint found.")
+            print("[INFO] No checkpoint found.")
 
-    # set the log directory for the environment (works for all environment types)
+    # set the log directory for the environment
     env_cfg.log_dir = log_dir
 
-    # create isaac environment
-    env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
+    # create isaac environment with N parallel envs
+    env = gym.make(args_cli.task, cfg=env_cfg, render_mode=None)
 
     # wrap around environment for rsl-rl
     env = RslRlVecEnvWrapper(env, clip_actions=agent_cfg.clip_actions)
@@ -124,85 +219,108 @@ def main(env_cfg: ManagerBasedRLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
 
     # obtain the trained policy for inference
     policy = runner.get_inference_policy(device=env.unwrapped.device)
-    critic = runner.alg.policy.evaluate
 
-    # extract the neural network module
-    policy_nn = runner.alg.policy
+    # Get robot info
+    asset: Articulation = env.unwrapped.scene["robot"]
+    num_joints = asset.data.joint_pos.shape[-1]
+    device = env.unwrapped.device
 
-    # extract the normalizer
-    if hasattr(policy_nn, "actor_obs_normalizer"):
-        normalizer = policy_nn.actor_obs_normalizer
-    elif hasattr(policy_nn, "student_obs_normalizer"):
-        normalizer = policy_nn.student_obs_normalizer
-    else:
-        normalizer = None
-    if hasattr(policy_nn, "critic_obs_normalizer"):
-        critic_normalizer = policy_nn.critic_obs_normalizer
-    else:
-        critic_normalizer = None
+    print(f"[INFO] Robot has {num_joints} joints")
+    print(f"[INFO] Using {N} parallel environments for batch sampling")
+    print(f"[INFO] Perturbation radius h = {args_cli.perturbation_radius}")
 
-    # export as jit
+    # Sample directions on unit sphere in joint state space (pos + vel)
+    # State dimension = 2 * num_joints (positions and velocities)
+    state_dim = 2 * num_joints
+    directions = sample_unit_sphere(N, state_dim, args_cli.seed, device)
+
+    # Split directions into position and velocity components
+    dir_pos = directions[:, :num_joints]  # (N, num_joints)
+    dir_vel = directions[:, num_joints:]  # (N, num_joints)
+
+    h = args_cli.perturbation_radius
+
+    # Get observation and action dimensions
+    obs_dim = env.unwrapped.observation_manager.group_obs_dim["policy"][0]
+    act_dim = env.unwrapped.action_manager.total_action_dim
+
+    # Initialize data storage
+    data = {
+        "h": h,
+        "N": N,
+        "num_joints": num_joints,
+        "state_dim": state_dim,
+        "obs_dim": obs_dim,
+        "act_dim": act_dim,
+        "seed": args_cli.seed,
+        "directions": directions.cpu(),
+    }
+
+    # =========================================================================
+    # Batch 1: Collect samples from origin (all envs at zero)
+    # =========================================================================
+    print("[INFO] Collecting sample from origin (batch)...")
+    zero_pos = torch.zeros(N, num_joints, device=device)
+    zero_vel = torch.zeros(N, num_joints, device=device)
+    sample_zero = collect_batch_sample(env, policy, zero_pos, zero_vel)
+    # Store just the first env's data as the canonical F(0) response
+    # (all should be identical since they start from the same state)
+    data["F_zero"] = {k: v[0] for k, v in sample_zero.items()}
+    # Also store all for verification
+    data["F_zero_all"] = sample_zero
+
+    # =========================================================================
+    # Batch 2: Collect samples for positive perturbations (+hd)
+    # Each env i is reset to state +h * d^(i)
+    # =========================================================================
+    print("[INFO] Collecting positive perturbation samples (+hd) in batch...")
+    pos_joint_pos = h * dir_pos  # (N, num_joints)
+    pos_joint_vel = h * dir_vel  # (N, num_joints)
+    sample_pos = collect_batch_sample(env, policy, pos_joint_pos, pos_joint_vel)
+    data["F_pos"] = sample_pos
+
+    # =========================================================================
+    # Batch 3: Collect samples for negative perturbations (-hd)
+    # Each env i is reset to state -h * d^(i)
+    # =========================================================================
+    print("[INFO] Collecting negative perturbation samples (-hd) in batch...")
+    neg_joint_pos = -h * dir_pos  # (N, num_joints)
+    neg_joint_vel = -h * dir_vel  # (N, num_joints)
+    sample_neg = collect_batch_sample(env, policy, neg_joint_pos, neg_joint_vel)
+    data["F_neg"] = sample_neg
+
+    print("[INFO] Batch sampling complete!")
+
+    # Save data
     if resume_path is not None:
-        export_model_dir = os.path.join(os.path.dirname(resume_path), "exported", "linearization")
-        export_policy_as_jit(policy_nn, normalizer=normalizer, path=export_model_dir, filename="policy_jit.pt")
-        export_critic_as_jit(policy_nn, normalizer=critic_normalizer, path=export_model_dir, filename="critic_jit.pt")
-        limits_path = os.path.join(export_model_dir, "policy_limits.pt")
-        asset: Articulation = env.unwrapped.scene["robot"]
-        pos_limits = asset.data.joint_pos_limits
-        vel_limits = asset.data.joint_vel_limits
-        effort_limits = asset.data.joint_effort_limits
-        limits = {"pos": pos_limits, "vel": vel_limits, "effort": effort_limits}
-        torch.save(limits, limits_path)
-        msg = ""
-        msg += str(env.unwrapped.action_manager) # type: ignore
-        msg += "\n"
-        msg += str(env.unwrapped.observation_manager) # type: ignore
-        msg += "\n"
-        msg += f"step dt: {env.unwrapped.step_dt}"
-        os.makedirs(export_model_dir, exist_ok=True)
-        policy_io_path = os.path.join(export_model_dir, "policy_io.txt")
-        with open(policy_io_path, "w", encoding="utf-8") as f:
-            f.write(msg)
-        print(f"[INFO] Exported policy to: {export_model_dir}")
+        export_dir = os.path.join(os.path.dirname(resume_path), "exported", "stability")
+        os.makedirs(export_dir, exist_ok=True)
+        save_path = os.path.join(export_dir, "stability_samples.pt")
+        torch.save(data, save_path)
+        print(f"[INFO] Saved stability samples to: {save_path}")
 
-    dt = env.unwrapped.step_dt
-
-    # reset environment
-    obs = env.get_observations()
-    # agent stepping
-    with torch.inference_mode():
-        actions = policy(obs)
-    # env stepping
-    new_obs, _, dones, _ = env.step(actions)
-    # todo only record if not done
-
-    
-    policy_nn.reset(dones)
-
-
-    timestep = 0
-    obs_dict = {}
-    # simulate environment
-    while simulation_app.is_running():
-        # run everything in inference mode
-        with torch.inference_mode():
-            # agent stepping
-            actions = policy(obs)
-            values = critic(obs)
-            obs_dict[timestep] = {
-                "obs": obs["policy"].cpu(),
-                "action": actions.cpu(),
-                "critic_obs": obs.get("critic", obs["policy"]).cpu(),
-                "value": values.cpu(),
-            }
-            # env stepping
-            obs, _, dones, _ = env.step(actions)
-            policy_nn.reset(dones)
-            obs_dict[timestep]["done"] = dones.cpu()
-        if resume_path is not None:
-            rollout_path = os.path.join(export_model_dir, "rollout.pt")
-            torch.save(obs_dict, rollout_path)
-            break
+        # Also save a summary
+        summary_path = os.path.join(export_dir, "stability_info.txt")
+        with open(summary_path, "w") as f:
+            f.write("Stability Sampling Summary\n")
+            f.write("==========================\n")
+            f.write(f"Perturbation radius h: {h}\n")
+            f.write(f"Number of samples N: {N}\n")
+            f.write(f"State dimension (joint): {state_dim}\n")
+            f.write(f"Observation dimension: {obs_dim}\n")
+            f.write(f"Action dimension: {act_dim}\n")
+            f.write(f"Random seed: {args_cli.seed}\n")
+            f.write(f"\nSampling method: Batch parallel ({N} environments)\n")
+            f.write(f"\nData structure:\n")
+            f.write(f"  F_pos: Response to +hd perturbations (N samples)\n")
+            f.write(f"  F_neg: Response to -hd perturbations (N samples)\n")
+            f.write(f"  F_zero: Response from origin (single canonical sample)\n")
+            f.write(f"  F_zero_all: Response from origin (all N envs for verification)\n")
+            f.write(f"\nFor Jacobian estimation:\n")
+            f.write(f"  y^(k) = (F_pos[k].obs_t1 - F_zero.obs_t1) / h\n")
+            f.write(f"\nFor Hessian estimation:\n")
+            f.write(f"  L2 ~ max_k ||(F_pos[k].obs_t1 - 2*F_zero.obs_t1 + F_neg[k].obs_t1) / h^2||\n")
+        print(f"[INFO] Saved summary to: {summary_path}")
 
     # close the simulator
     env.close()
