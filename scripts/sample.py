@@ -1,0 +1,215 @@
+"""Script to play a checkpoint if an RL agent from RSL-RL."""
+
+"""Launch Isaac Sim Simulator first."""
+
+import argparse
+import sys
+
+from isaaclab.app import AppLauncher
+
+# local imports
+import cli_args  # isort: skip
+
+# add argparse arguments
+parser = argparse.ArgumentParser(description="Train an RL agent with RSL-RL.")
+parser.add_argument(
+    "--disable_fabric", action="store_true", default=False, help="Disable fabric and use USD I/O operations."
+)
+parser.add_argument("--num_envs", type=int, default=None, help="Number of environments to simulate.")
+parser.add_argument("--task", type=str, default=None, help="Name of the task.")
+parser.add_argument(
+    "--agent", type=str, default="rsl_rl_cfg_entry_point", help="Name of the RL agent configuration entry point."
+)
+parser.add_argument("--seed", type=int, default=None, help="Seed used for the environment")
+parser.add_argument("--export", action="store_true", default=False, help="Export policy with jit.")
+
+# append RSL-RL cli arguments
+cli_args.add_rsl_rl_args(parser)
+# append AppLauncher cli args
+AppLauncher.add_app_launcher_args(parser)
+# parse the arguments
+args_cli, hydra_args = parser.parse_known_args()
+args_cli.headless = True
+
+# suppress logs
+if not hasattr(args_cli, "kit_args"):
+    args_cli.kit_args = ""
+args_cli.kit_args += " --/log/level=error"
+args_cli.kit_args += " --/log/fileLogLevel=error"
+args_cli.kit_args += " --/log/outputStreamLevel=error"
+
+# clear out sys.argv for Hydra
+sys.argv = [sys.argv[0]] + hydra_args
+
+# launch omniverse app
+app_launcher = AppLauncher(args_cli)
+simulation_app = app_launcher.app
+
+ISAAC_PREFIXES = ("--/log/", "--/app/", "--/renderer=", "--/physics/")
+hydra_args = [arg for arg in hydra_args if not arg.startswith(ISAAC_PREFIXES)]
+sys.argv = [sys.argv[0]] + hydra_args
+
+"""Rest everything follows."""
+
+import gymnasium as gym
+import os
+import time
+import torch
+
+from rsl_rl.runners import DistillationRunner, OnPolicyRunner
+
+import nonlinear_ct.tasks # noqa: F401
+import isaaclab_tasks  # noqa: F401
+from isaaclab.assets import Articulation
+from isaaclab.envs import ManagerBasedRLEnvCfg
+from isaaclab.utils.assets import retrieve_file_path
+from isaaclab.utils.dict import print_dict
+from isaaclab_rl.rsl_rl import RslRlBaseRunnerCfg, RslRlVecEnvWrapper
+from isaaclab_tasks.utils import get_checkpoint_path
+from isaaclab_tasks.utils.hydra import hydra_task_config
+from isaaclab_rl.rsl_rl import export_policy_as_jit
+
+from exporter import export_critic_as_jit
+
+
+@hydra_task_config(args_cli.task, args_cli.agent)
+def main(env_cfg: ManagerBasedRLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
+    """Play with RSL-RL agent."""
+
+    # override configurations with non-hydra CLI arguments
+    agent_cfg: RslRlBaseRunnerCfg = cli_args.update_rsl_rl_cfg(agent_cfg, args_cli)
+    env_cfg.scene.num_envs = args_cli.num_envs if args_cli.num_envs is not None else env_cfg.scene.num_envs
+
+    # set the environment seed
+    # note: certain randomizations occur in the environment initialization so we set the seed here
+    env_cfg.seed = agent_cfg.seed
+    env_cfg.sim.device = args_cli.device if args_cli.device is not None else env_cfg.sim.device
+
+    # specify directory for logging experiments
+    log_root_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
+    log_root_path = os.path.join(log_root_path, "logs", agent_cfg.experiment_name)
+    log_root_path = os.path.abspath(log_root_path)
+    print(f"[INFO] Loading experiment from directory: {log_root_path}")
+    if args_cli.checkpoint:
+        resume_path = retrieve_file_path(args_cli.checkpoint)
+        log_dir = os.path.dirname(resume_path)
+    else:
+        try:
+            resume_path = get_checkpoint_path(log_root_path, agent_cfg.load_run, agent_cfg.load_checkpoint)
+            log_dir = os.path.dirname(resume_path)
+        except:
+            resume_path = None
+            log_dir = log_root_path
+            print(f"[INFO] No checkpoint found.")
+
+    # set the log directory for the environment (works for all environment types)
+    env_cfg.log_dir = log_dir
+
+    # create isaac environment
+    env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
+
+    # wrap around environment for rsl-rl
+    env = RslRlVecEnvWrapper(env, clip_actions=agent_cfg.clip_actions)
+
+    print(f"[INFO]: Loading model checkpoint from: {resume_path}")
+    # load previously trained model
+    if agent_cfg.class_name == "OnPolicyRunner":
+        runner = OnPolicyRunner(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
+    elif agent_cfg.class_name == "DistillationRunner":
+        runner = DistillationRunner(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
+    else:
+        raise ValueError(f"Unsupported runner class: {agent_cfg.class_name}")
+    if resume_path is not None:
+        runner.load(resume_path)
+
+    # obtain the trained policy for inference
+    policy = runner.get_inference_policy(device=env.unwrapped.device)
+    critic = runner.alg.policy.evaluate
+
+    # extract the neural network module
+    policy_nn = runner.alg.policy
+
+    # extract the normalizer
+    if hasattr(policy_nn, "actor_obs_normalizer"):
+        normalizer = policy_nn.actor_obs_normalizer
+    elif hasattr(policy_nn, "student_obs_normalizer"):
+        normalizer = policy_nn.student_obs_normalizer
+    else:
+        normalizer = None
+    if hasattr(policy_nn, "critic_obs_normalizer"):
+        critic_normalizer = policy_nn.critic_obs_normalizer
+    else:
+        critic_normalizer = None
+
+    # export as jit
+    if resume_path is not None:
+        export_model_dir = os.path.join(os.path.dirname(resume_path), "exported", "linearization")
+        export_policy_as_jit(policy_nn, normalizer=normalizer, path=export_model_dir, filename="policy_jit.pt")
+        export_critic_as_jit(policy_nn, normalizer=critic_normalizer, path=export_model_dir, filename="critic_jit.pt")
+        limits_path = os.path.join(export_model_dir, "policy_limits.pt")
+        asset: Articulation = env.unwrapped.scene["robot"]
+        pos_limits = asset.data.joint_pos_limits
+        vel_limits = asset.data.joint_vel_limits
+        effort_limits = asset.data.joint_effort_limits
+        limits = {"pos": pos_limits, "vel": vel_limits, "effort": effort_limits}
+        torch.save(limits, limits_path)
+        msg = ""
+        msg += str(env.unwrapped.action_manager) # type: ignore
+        msg += "\n"
+        msg += str(env.unwrapped.observation_manager) # type: ignore
+        msg += "\n"
+        msg += f"step dt: {env.unwrapped.step_dt}"
+        os.makedirs(export_model_dir, exist_ok=True)
+        policy_io_path = os.path.join(export_model_dir, "policy_io.txt")
+        with open(policy_io_path, "w", encoding="utf-8") as f:
+            f.write(msg)
+        print(f"[INFO] Exported policy to: {export_model_dir}")
+
+    dt = env.unwrapped.step_dt
+
+    # reset environment
+    obs = env.get_observations()
+    # agent stepping
+    with torch.inference_mode():
+        actions = policy(obs)
+    # env stepping
+    new_obs, _, dones, _ = env.step(actions)
+    # todo only record if not done
+
+    
+    policy_nn.reset(dones)
+
+
+    timestep = 0
+    obs_dict = {}
+    # simulate environment
+    while simulation_app.is_running():
+        # run everything in inference mode
+        with torch.inference_mode():
+            # agent stepping
+            actions = policy(obs)
+            values = critic(obs)
+            obs_dict[timestep] = {
+                "obs": obs["policy"].cpu(),
+                "action": actions.cpu(),
+                "critic_obs": obs.get("critic", obs["policy"]).cpu(),
+                "value": values.cpu(),
+            }
+            # env stepping
+            obs, _, dones, _ = env.step(actions)
+            policy_nn.reset(dones)
+            obs_dict[timestep]["done"] = dones.cpu()
+        if resume_path is not None:
+            rollout_path = os.path.join(export_model_dir, "rollout.pt")
+            torch.save(obs_dict, rollout_path)
+            break
+
+    # close the simulator
+    env.close()
+
+
+if __name__ == "__main__":
+    # run the main function
+    main()
+    # close sim app
+    simulation_app.close()

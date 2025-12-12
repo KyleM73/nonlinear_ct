@@ -74,7 +74,7 @@ Consider a nonlinear, time varying system
 \begin{equation}
 \dot x_t = f(x_t) + g(x_t)u_t
 \end{equation}
-with state $x_t\in\mathbb{R}^m$ and control signal $u_t\in\mathbb{R}^n$.
+with state $x_t\in\mathbb{R}^n$ and control signal $u_t\in\mathbb{R}^m$.
 We seek to understand the sensitivity of the closed loop dynamics without assuming knowledge of $f$ or $g$.
 Let $u_t = \pi(z_t)$ be the output from a neural network controller tracking a reference signal such that the error dynamics
 \begin{equation}
@@ -91,33 +91,90 @@ J_\text{cl} = \frac{\partial F}{\partial z_t}\bigg\vert_{z_t=0}
 and can be estimated as follows:
 
 For $k=1,...,N$ select perturbation direction $d^{(k)}\in\mathbb{R}^n$ with $||d^{(k)}||=1$ and radius $h\in\mathbb{R}$.
-Then define the finite difference
+Then define the forward difference
 \begin{equation}
-y^{(k)} := \frac{F(hd^{(k)})-F(-hd^{(k)})}{2h}
+% y^{(k)} := \frac{F(hd^{(k)})-F(-hd^{(k)})}{2h}
+y^{(k)} := \frac{F(hd^{(k)})-F(0)}{h}
 \end{equation}
-with estimator $y^{(k)}=J_\text{cl}d^{(k)}+\epsilon^{(k)}$, $\epsilon^{(k)}\sim\mathcal{N}(0,\Sigma)$.
-Let $Y=[y^{(1)},...,y^{(N)}]\in\mathbb{R}^{n\times N}$, $D=[d^{(1)},...,d^{(N)}]\in\mathbb{R}^{n\times N}$ and $E=[\epsilon^{(1)},...,\epsilon^{(N)}]\in\mathbb{R}^{n\times N}$.
+with estimator $y^{(k)}=J_\text{cl}d^{(k)}+\frac{r^{(k)}}{h}$ and remainder $r^{(k)}=\frac{1}{2}(hd^{(k)})^T\mathcal{H}(hd^{(k)})=\mathcal{O}(h^2)$.
+Let $Y=[y^{(1)},...,y^{(N)}]\in\mathbb{R}^{n\times N}$, $D=[d^{(1)},...,d^{(N)}]\in\mathbb{R}^{n\times N}$ and $R=[\frac{r^{(1)}}{h},...,\frac{r^{(N)}}{h}]\in\mathbb{R}^{n\times N}$.
 Then, 
 \begin{equation}
 \begin{split}
-Y&=J_\text{cl} D+E \\
+Y&=J_\text{cl} D+R \\
 \hat J_\text{cl} &= YD^T(DD^T)^{-1}
 \end{split}
 \end{equation}
 if $DD^T$ is invertible (i.e. $\{d^{(k)}\}$ spans $\mathbb{R}^n$).
 A valid choice of $\{d^{(k)}\}$ requires $N\geq n$.
 
+To show convergence to the equilibrium, we must show that $J_\text{cl}$ is Hurwitz.
+Define the estimation error 
+\begin{equation}
+\Delta J_\text{cl} := \hat J_\text{cl} - J_\text{cl}.
+\end{equation}
+From the estimator model we have
+\begin{equation} \label{esterror}
+\Delta J_\text{cl} = RD^T(DD^T)^{-1}
+\end{equation}
+with bound $||\Delta J_\text{cl}||_2\leq||R||_2||D^T(DD^T)^{-1}||_2$.
+Using the singular value decomposition $D=U\Sigma V^T$, the directional term on the right-hand side can be simplified $D^T(DD^T)^{-1}=V\Sigma^{-1} U^T$, yielding
+\begin{equation} \label{Dsigma}
+||D^T(DD^T)^{-1}||_2=\frac{1}{\sigma_\text{min}(D)}.
+\end{equation}
+Where $\{d^{(k)}\}$ is selected as $N$ i.i.d unit norm isotropic random directions, $DD^T\approx \frac{N}{n}I$ results in $\sigma_\text{min}(D)\approx\sqrt{\frac{N}{n}}$ with high probability for large $N$.
+Next, by assuming $F\in\mathcal{C}^2$, we can bound the second-order Taylor remainder as $||\frac{r^{(k)}}{h}||_2\leq\frac{1}{2}L_2h||d^{(k)}||_2$.
+The constant $L_2$ can be estimated via the second directional derivative
+\begin{equation}
+\begin{split}
+\hat L_2&=\sup_{||d||=1}||D^2F(0)[d,d]||_2\\
+&\approx \max_k \bigg|\bigg|\frac{F(hd^{(k)})-2F(0)+F(-hd^{(k)})}{h^2}\bigg|\bigg|
+\end{split}
+\end{equation}
+To account for numerical error, a small scale may be used $L_2=\beta\hat L_2$, $\beta> 1$.
+Then,
+\begin{equation} \label{Rbound}
+% ||R||_2\leq\max_k||r^{(k)}||_2\sqrt{N} 
+\begin{split}
+||R||_2&\leq\max_k||\frac{r^{(k)}}{h}||_2\sqrt{\text{rank}(R)} \\
+&\leq\max_k||\frac{r^{(k)}}{h}||_2\sqrt{\min(n,N)} \\
+&\leq\frac{1}{2}L_2h\sqrt{n}
+\end{split}
+\end{equation}
+using the requirement that $\{d^{(k)}\}$ spans $\mathbb{R}^n$.
+% with factor $\sqrt{N}$ the spectral norm of a matrix whose columns are each size $\frac{1}{2}L_2h^2$.
+Substituting bounds into Eq. \ref{esterror}, we find a computable bound on the estimation error
+\begin{equation}
+||\Delta J_\text{cl}||_2\leq\frac{1}{2}L_2h\frac{n}{\sqrt{N}}
+\end{equation}
 
+From this upper bound we may now derive the conditions to certify that $J_\text{cl}$ is Hurwitz given $\hat J_\text{cl}$.
+Assume $J_\text{cl}$ is diagonalizable.
+Let $\hat J_\text{cl}=V\Lambda V^{-1}$ with eigenvalues $\{\hat \lambda_i\}$ and margin $\hat \lambda = -\max_i \operatorname{Re}{\hat \lambda_i}$.
+The Baur-Fike Theorem \cite{bauer1960norms} gives a bound on the distance between an eigenvalue $\lambda_i$ of $J_\text{cl}=\hat J_\text{cl} - \Delta J_\text{cl}$ and $\hat \lambda_i$:
+\begin{equation}
+\begin{split}
+|\lambda_i-\hat \lambda_i|&\leq\kappa(V)||\Delta J_\text{cl}||_2 \\
+&\leq\kappa(V)\frac{1}{2}L_2h\frac{n}{\sqrt{N}}
+\end{split}
+\end{equation}
+with condition number $\kappa(V)=||V||_2||V^{-1}||_2$ for the matrix of eigenvectors of $\hat J_\text{cl}$.
+Therefore, if 
+\begin{equation} \label{datboi}
+\kappa(V)\frac{1}{2}L_2h\frac{n}{\sqrt{N}}\leq\hat\lambda
+\end{equation}
+then
+\begin{equation}
+\begin{split}
+\operatorname{Re}{\lambda_i}&\leq\operatorname{Re}{\hat \lambda_i}+|\lambda_i-\hat\lambda_i|\\
+&\leq-\hat\lambda+\kappa(V)\frac{1}{2}L_2h\frac{n}{\sqrt{N}}\\
+&<0\forall\lambda_i.
+\end{split}
+\end{equation}
+Thus, Eq. \ref{datboi} is sufficient to conclude that $J_\text{cl}$ is Hurwitz.
+We have now certified that the closed loop dynamics are locally exponentially stable based on the sampled response within the perturbation radius $h$ for each $t>t_0$.
+This proof holds despite only assuming $J_\text{cl}$ is diagonalizable, $\{d^{(k)}\}$ is full rank, and $F\in\mathcal{C}^2$.
 
-Divergence happens near singularity of open loop dynamics and sensitive regions of policy
-
-Show with $M\ddot q = \tau$
-
-Assume not near singularity
-
-Then sensitive only if policy is sensitive
-
-Do policy analysis
 
 
 
@@ -129,7 +186,8 @@ Do policy analysis
 
 \section{CONCLUSIONS}
 
-This template provides authors with most of the formatting specifications needed for preparing electronic versions of their papers. All standard paper components have been specified for three reasons: (1) ease of use when formatting individual papers, (2) automatic compliance to electronic requirements that facilitate the concurrent or later production of electronic products, and (3) conformity of style throughout a conference proceedings. Margins, column widths, line spacing, and type styles are built-in; examples of the type styles are provided throughout this document and are identified in italic type, within parentheses, following the example. Some components, such as multi-leveled equations, graphics, and tables are not prescribed, although the various table text styles are provided. The formatter will need to create these components, incorporating the applicable criteria that follow.
+
+
 
 
 
@@ -187,19 +245,8 @@ magnetic core versus DC bias magnetic field}
 % sure that you do not shorten the text height too much.
 \addtolength{\textheight}{-12cm}  
 
-
-\section*{APPENDIX}
-
-Appendixes should appear before the acknowledgment.
-
-\section*{ACKNOWLEDGMENT}
-
-
-
-
 \nocite{*}
 \bibliographystyle{IEEEtran}
 \bibliography{IEEEabrv,references}
-
 
 \end{document}

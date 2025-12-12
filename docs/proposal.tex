@@ -18,7 +18,7 @@
 \maketitle
 
 \section{Motivation}
-Reinforcement learning (RL) has become the standard control technique in legged locomotion due to its robustness, expressivity, and ease of deployment.
+Reinforcement learning (RL) has become the standard control technique in legged locomotion due to its robustness, expressiveness, and ease of deployment.
 Despite these attributes, RL control policies still fail catastrophically when evaluated on out of distribution (OOD) inputs.
 Due to the black box nature of RL policies, safety efforts largely focus on observing potentially destabilizing changes in the action space of the policy, and triggering safe modes when risk thresholds are reached (e.g. over-current protection).
 Efforts to quantify the distribution of valid inputs during training may result in more proactive runtime anomaly detection, but such efforts provide only weak guarantees of stability given the distribution shift between simulation-based training and hardware deployment.
