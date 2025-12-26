@@ -104,6 +104,30 @@ class TestEventCfg:
         },
     )
 
+
+@configclass
+class StabilitySampleEventCfg:
+    """Configuration for stability sampling events.
+
+    Resets joints to target positions/velocities stored in env._target_joint_pos
+    and env._target_joint_vel. Used for collecting data for stability analysis
+    per the Jacobian estimation method in the paper.
+    """
+
+    # reset base to origin (fixed)
+    reset_base = EventTerm(
+        func=mdp.reset_root_state_uniform,
+        mode="reset",
+        params={"pose_range": {}, "velocity_range": {}},
+    )
+
+    # reset joints to target state (set externally via env attributes)
+    reset_joints = EventTerm(
+        func=task_mdp.reset_joints_to_target,
+        mode="reset",
+        params={},
+    )
+
 @configclass
 class RewardsCfg:
     """Reward terms for the MDP."""
@@ -159,3 +183,25 @@ class DynamicsEnvCfg(ManagerBasedRLEnvCfg):
 @configclass
 class TestDynamicsEnvCfg(DynamicsEnvCfg):
     events: TestEventCfg = TestEventCfg()
+
+
+@configclass
+class StabilitySampleEnvCfg(DynamicsEnvCfg):
+    """Configuration for stability sampling environment.
+
+    Uses StabilitySampleEventCfg to reset joints to specific target states
+    for collecting perturbation data needed for Jacobian estimation.
+
+    Note: num_envs is set dynamically by sample.py based on --num_samples.
+    Each parallel environment gets a different perturbation direction for
+    fast batch sampling.
+    """
+    # num_envs will be overridden by sample.py to match num_samples
+    scene: SceneCfg = SceneCfg(num_envs=100, env_spacing=5.0)
+    events: StabilitySampleEventCfg = StabilitySampleEventCfg()
+
+    def __post_init__(self) -> None:
+        """Post initialization."""
+        super().__post_init__()
+        # Single step episodes for perturbation sampling
+        self.episode_length_s = 0.06  # Single timestep

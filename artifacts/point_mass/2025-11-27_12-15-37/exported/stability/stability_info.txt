@@ -1,0 +1,22 @@
+Stability Sampling Summary
+==========================
+Perturbation radius h: 0.01
+Number of samples N: 5000
+State dimension (joint): 4
+Observation dimension: 4
+Action dimension: 2
+Random seed: 42
+
+Sampling method: Batch parallel (5000 environments)
+
+Data structure:
+  F_pos: Response to +hd perturbations (N samples)
+  F_neg: Response to -hd perturbations (N samples)
+  F_zero: Response from origin (single canonical sample)
+  F_zero_all: Response from origin (all N envs for verification)
+
+For Jacobian estimation:
+  y^(k) = (F_pos[k].obs_t1 - F_zero.obs_t1) / h
+
+For Hessian estimation:
+  L2 ~ max_k ||(F_pos[k].obs_t1 - 2*F_zero.obs_t1 + F_neg[k].obs_t1) / h^2||
