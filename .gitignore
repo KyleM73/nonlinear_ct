@@ -51,3 +51,4 @@ wandb/
 *.nav
 *.snm
 *.vrb
+*.DS_Store
