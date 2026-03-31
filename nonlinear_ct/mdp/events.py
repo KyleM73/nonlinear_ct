@@ -1,7 +1,8 @@
-"""Custom event functions for stability sampling."""
+"""Custom event functions for the point mass environment."""
 
 from __future__ import annotations
 
+import math
 import torch
 from typing import TYPE_CHECKING
 
@@ -10,6 +11,28 @@ from isaaclab.managers import SceneEntityCfg
 
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedEnv
+
+
+def reset_joints_in_unit_disk(
+    env: ManagerBasedEnv,
+    env_ids: torch.Tensor,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+):
+    """Reset joint positions uniformly inside the unit disk with zero velocity.
+
+    Samples radius ~ sqrt(U[0,1]) and angle ~ U[0, 2*pi] for uniform area coverage.
+    """
+    asset: Articulation = env.scene[asset_cfg.name]
+    num_envs = len(env_ids)
+    device = asset.data.default_joint_pos.device
+
+    # uniform sampling in the unit disk: r = sqrt(u), theta = uniform
+    r = torch.sqrt(torch.rand(num_envs, device=device))
+    theta = 2.0 * math.pi * torch.rand(num_envs, device=device)
+    joint_pos = torch.stack([r * torch.cos(theta), r * torch.sin(theta)], dim=-1)
+    joint_vel = torch.zeros_like(joint_pos)
+
+    asset.write_joint_state_to_sim(joint_pos, joint_vel, joint_ids=asset_cfg.joint_ids, env_ids=env_ids)
 
 
 def reset_joints_to_target(

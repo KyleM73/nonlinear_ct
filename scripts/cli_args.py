@@ -36,6 +36,12 @@ def add_rsl_rl_args(parser: argparse.ArgumentParser):
     arg_group.add_argument(
         "--log_project_name", type=str, default=None, help="Name of the logging project when using wandb or neptune."
     )
+    arg_group.add_argument(
+        "--wandb_run_id",
+        type=str,
+        default=None,
+        help="WandB run ID to resume from. Downloads the latest checkpoint and continues the WandB run.",
+    )
 
 
 def parse_rsl_rl_cfg(task_name: str, args_cli: argparse.Namespace) -> RslRlBaseRunnerCfg:

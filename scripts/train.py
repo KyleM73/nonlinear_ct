@@ -91,6 +91,24 @@ torch.backends.cudnn.deterministic = False
 torch.backends.cudnn.benchmark = False
 
 
+def download_wandb_checkpoint(run_id: str, project: str, entity: str) -> str:
+    """Download the latest model checkpoint from a WandB run."""
+    import wandb
+
+    api = wandb.Api()
+    run = api.run(f"{entity}/{project}/{run_id}")
+    files = [f for f in run.files() if f.name.startswith("model_") and f.name.endswith(".pt")]
+    if not files:
+        raise FileNotFoundError(f"No model checkpoints found in WandB run {run_id}")
+    # Pick highest iteration number
+    latest = max(files, key=lambda f: int(f.name.split("_")[1].split(".")[0]))
+    print(f"[INFO] Downloading {latest.name} from WandB run {run_id}...")
+    download_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "wandb_downloads", run_id)
+    os.makedirs(download_dir, exist_ok=True)
+    latest.download(root=download_dir, replace=True)
+    return os.path.join(download_dir, latest.name)
+
+
 @hydra_task_config(args_cli.task, args_cli.agent)
 def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
     """Train with RSL-RL agent."""
@@ -155,9 +173,21 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     if isinstance(env.unwrapped, DirectMARLEnv):
         env = multi_agent_to_single_agent(env)
 
+    # download checkpoint from WandB if requested
+    if args_cli.wandb_run_id:
+        resume_path = download_wandb_checkpoint(
+            args_cli.wandb_run_id,
+            agent_cfg.wandb_project,
+            agent_cfg.wandb_entity,
+        )
+        os.environ["WANDB_RUN_ID"] = args_cli.wandb_run_id
+        os.environ["WANDB_RESUME"] = "must"
+        agent_cfg.resume = True
+
     # save resume path before creating a new log_dir
     if agent_cfg.resume or agent_cfg.algorithm.class_name == "Distillation":
-        resume_path = get_checkpoint_path(log_root_path, agent_cfg.load_run, agent_cfg.load_checkpoint)
+        if not args_cli.wandb_run_id:  # already downloaded above
+            resume_path = get_checkpoint_path(log_root_path, agent_cfg.load_run, agent_cfg.load_checkpoint)
 
     # create agent config dict
     agent_cfg_dict = agent_cfg.to_dict()
@@ -177,6 +207,10 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         agent_cfg_dict["video_interval"] = args_cli.video_interval
 
     agent_cfg_dict["log_interval"] = args_cli.log_interval
+
+    # set wandb entity from config so the rsl-rl writer picks it up
+    if hasattr(agent_cfg, "wandb_entity") and agent_cfg.wandb_entity:
+        os.environ["WANDB_USERNAME"] = agent_cfg.wandb_entity
 
     # wrap around environment for rsl-rl
     env = RslRlVecEnvWrapper(env, clip_actions=agent_cfg.clip_actions)
@@ -203,8 +237,88 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # run training
     runner.learn(num_learning_iterations=agent_cfg.max_iterations, init_at_random_ep_len=True)
 
+    # post-training evaluation
+    post_training_eval(runner, env, log_dir)
+
     # close the simulator
     env.close()
+
+
+def post_training_eval(runner, env, log_dir, num_samples=10):
+    """Run 10 episodes from random initial conditions and save trajectory + action plots."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    policy = runner.get_inference_policy(device=env.unwrapped.device)
+    unwrapped = env.unwrapped
+    robot = unwrapped.scene["robot"]
+    body_idx = robot.find_bodies("end_effector")[0][0]
+
+    max_steps = int(unwrapped.max_episode_length)
+    dt = unwrapped.step_dt
+
+    # storage
+    positions = torch.zeros(max_steps, num_samples, 2)
+    action_mags = torch.zeros(max_steps, num_samples)
+    episode_lengths = torch.full((num_samples,), max_steps, dtype=torch.long)
+
+    # Internal sim tensors were created under inference mode during training.
+    # Inplace ops on inference tensors require being inside inference mode.
+    with torch.inference_mode():
+        obs, _ = env.reset()
+        for step in range(max_steps):
+            actions = policy(obs)
+            obs, _, dones, _ = env.step(actions)
+
+            # read ground-truth position from scene
+            pos = robot.data.body_link_pos_w[:num_samples, body_idx, :2].clone()
+            pos -= unwrapped.scene.env_origins[:num_samples, :2]
+            positions[step] = pos.cpu()
+            action_mags[step] = actions[:num_samples].norm(dim=-1).cpu()
+
+            # mark first termination per env
+            for i in range(num_samples):
+                if dones[i] and episode_lengths[i] == max_steps:
+                    episode_lengths[i] = step + 1
+
+    # --- Plot 1: XY trajectories ---
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
+
+    for i in range(num_samples):
+        L = episode_lengths[i]
+        ax1.plot(positions[:L, i, 0].numpy(), positions[:L, i, 1].numpy(), alpha=0.7, linewidth=1)
+    ax1.scatter([0], [0], s=60, color="black", marker="*", zorder=10)
+    ax1.set_xlabel("x (m)")
+    ax1.set_ylabel("y (m)")
+    ax1.set_title("Position Trajectories")
+    ax1.set_aspect("equal")
+    ax1.grid(True, alpha=0.3)
+
+    # --- Plot 2: Action magnitude over time ---
+    time_s = torch.arange(max_steps).numpy() * dt
+    for i in range(num_samples):
+        L = episode_lengths[i]
+        ax2.plot(time_s[:L], action_mags[:L, i].numpy(), alpha=0.7, linewidth=1)
+    ax2.set_xlabel("Time (s)")
+    ax2.set_ylabel("||u||")
+    ax2.set_title("Action Magnitude")
+    ax2.grid(True, alpha=0.3)
+
+    fig.tight_layout()
+    save_path = os.path.join(log_dir, "eval_trajectories.png")
+    fig.savefig(save_path, dpi=150)
+    print(f"[INFO] Saved evaluation plots to: {save_path}")
+
+    # log eval image to wandb
+    try:
+        import wandb
+        if wandb.run is not None:
+            wandb.log({"Eval/trajectories": wandb.Image(fig)})
+    except ImportError:
+        pass
+
+    plt.close(fig)
 
 
 if __name__ == "__main__":

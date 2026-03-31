@@ -1,9 +1,6 @@
-import math
-
 import isaaclab.sim as sim_utils
 from isaaclab.assets import ArticulationCfg, AssetBaseCfg
 from isaaclab.envs import ManagerBasedRLEnvCfg, ViewerCfg
-from isaaclab.managers import CurriculumTermCfg as CurrTerm
 from isaaclab.managers import EventTermCfg as EventTerm
 from isaaclab.managers import ObservationGroupCfg as ObsGroup
 from isaaclab.managers import ObservationTermCfg as ObsTerm
@@ -12,7 +9,6 @@ from isaaclab.managers import SceneEntityCfg
 from isaaclab.managers import TerminationTermCfg as DoneTerm
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.utils import configclass
-from isaaclab.utils.noise import AdditiveUniformNoiseCfg as Unoise
 
 import isaaclab.envs.mdp as mdp
 
@@ -51,22 +47,45 @@ class ActionsCfg:
 
 @configclass
 class ObservationsCfg:
-    """Observation specifications for the MDP."""
+    """Observation specifications for the MDP.
+
+    Actor (policy): position only, with configurable history_length for implicit velocity estimation.
+    Critic: position + velocity + last action (full state information).
+    """
 
     @configclass
     class PolicyCfg(ObsGroup):
-        """Observations for policy group."""
-        pose = ObsTerm(func=task_mdp.body_pos_w, noise=Unoise(n_min=-0.01, n_max=0.01), params={
+        """Observations for actor — position only, with configurable history length."""
+        pose = ObsTerm(func=task_mdp.body_pos_w, params={
             "asset_cfg": SceneEntityCfg("robot", body_names="end_effector")})
-        velocity = ObsTerm(func=task_mdp.body_vel_w, noise=Unoise(n_min=-0.1, n_max=0.1), params={
+
+        def __post_init__(self):
+            self.enable_corruption = False
+            self.concatenate_terms = True
+            self.history_length = 1
+
+    @configclass
+    class CriticCfg(ObsGroup):
+        """Observations for critic — position, velocity, and last action."""
+        pose = ObsTerm(func=task_mdp.body_pos_w, params={
             "asset_cfg": SceneEntityCfg("robot", body_names="end_effector")})
-        # last_action = ObsTerm(mdp.last_action)
-    
+        velocity = ObsTerm(func=task_mdp.body_vel_w, params={
+            "asset_cfg": SceneEntityCfg("robot", body_names="end_effector")})
+        last_action = ObsTerm(func=mdp.last_action)
+
+        def __post_init__(self):
+            self.enable_corruption = False
+            self.concatenate_terms = True
+
     policy: PolicyCfg = PolicyCfg()
+    critic: CriticCfg = CriticCfg()
 
 @configclass
 class EventCfg:
-    """Configuration for events."""
+    """Configuration for events.
+
+    Initializes position uniformly inside the unit disk, with zero velocity.
+    """
 
     # reset
     reset_base = EventTerm(
@@ -76,12 +95,9 @@ class EventCfg:
     )
 
     reset_joints = EventTerm(
-        func=mdp.reset_joints_by_offset,
+        func=task_mdp.reset_joints_in_unit_disk,
         mode="reset",
-        params={
-            "position_range": (-2.0, 2.0),
-            "velocity_range": (-1.0, 1.0),
-        },
+        params={},
     )
 
 @configclass
@@ -136,14 +152,15 @@ class RewardsCfg:
         "asset_cfg": SceneEntityCfg("robot", body_names="end_effector")})
     vel_error = RewTerm(func=task_mdp.vel_error, weight=-0.01, params={
         "asset_cfg": SceneEntityCfg("robot", body_names="end_effector")})
-    acc_error = RewTerm(func=task_mdp.acc_error, weight=-0.001, params={
-        "asset_cfg": SceneEntityCfg("robot", body_names="end_effector")})
+    # action_penalty = RewTerm(func=task_mdp.action_penalty, weight=-0.001)
 
 @configclass
 class TerminationsCfg:
     """Termination terms for the MDP."""
 
     time_out = DoneTerm(func=mdp.time_out, time_out=True)
+    # out_of_bounds = DoneTerm(func=task_mdp.position_out_of_bounds, params={
+    #     "radius": 10.0, "asset_cfg": SceneEntityCfg("robot", body_names="end_effector")})
 
 @configclass
 class CurriculumCfg:
@@ -159,7 +176,11 @@ class DynamicsEnvCfg(ManagerBasedRLEnvCfg):
     """Configuration for the point mass environment."""
 
     # Scene settings
-    viewer: ViewerCfg = ViewerCfg(eye=(0.0, 0.0, 5.0), origin_type="env", env_index=0)
+    # Camera height h = 2*sqrt(3) ≈ 3.464m gives ±2m visible extent at ground
+    # assuming default 60° FOV: half_width = h * tan(30°) = h/√3 = 2m
+    viewer: ViewerCfg = ViewerCfg(
+        eye=(0.0, 0.0, 3.464), origin_type="env", env_index=0, resolution=(512, 512),
+    )
     scene: SceneCfg = SceneCfg(num_envs=8192, env_spacing=5.0)
     # Basic settings
     observations: ObservationsCfg = ObservationsCfg()

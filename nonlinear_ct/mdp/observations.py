@@ -46,7 +46,7 @@ def body_pos_w(
     # access the body poses in world frame
     pose = asset.data.body_link_pos_w[:, asset_cfg.body_ids]
     pose -= env.scene.env_origins.unsqueeze(1)
-    return pose[..., :2].reshape(env.num_envs, -1)
+    return pose[..., :2].view(env.num_envs, -1)
 
 @generic_io_descriptor(observation_type="BodyState", on_inspect=[record_shape, record_dtype, record_body_names])
 def body_vel_w(
@@ -70,4 +70,4 @@ def body_vel_w(
 
     # access the body poses in world frame
     vel = asset.data.body_link_lin_vel_w[:, asset_cfg.body_ids, :2]
-    return vel.reshape(env.num_envs, -1)
+    return vel.view(env.num_envs, -1)

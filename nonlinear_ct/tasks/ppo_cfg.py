@@ -4,13 +4,14 @@ from isaaclab_rl.rsl_rl import RslRlOnPolicyRunnerCfg, RslRlPpoActorCriticCfg, R
 @configclass
 class PointMassPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     num_steps_per_env = 24
-    max_iterations = 1_050
+    max_iterations = 10_050
     save_interval = 500
     experiment_name = "point_mass"
-    obs_groups = {"policy": ["policy"], "critic": ["policy"]}
+    obs_groups = {"policy": ["policy"], "critic": ["critic"]}
     store_code_state = True
     logger = "wandb"
     wandb_project = "Point Mass"
+    wandb_entity = "Apptronik"
     policy = RslRlPpoActorCriticCfg(
         init_noise_std=1.0,
         actor_obs_normalization=True,

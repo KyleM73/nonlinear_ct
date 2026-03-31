@@ -50,3 +50,9 @@ def acc_error(
     # access the body poses in world frame
     acc = asset.data.body_com_lin_acc_w[:, asset_cfg.body_ids]
     return acc.norm(dim=1).sum(dim=1)
+
+def action_penalty(
+    env: ManagerBasedEnv,
+) -> torch.Tensor:
+    """Penalizes action magnitude (proxy for acceleration in unit-mass double integrator)."""
+    return env.action_manager.action.norm(dim=-1)
