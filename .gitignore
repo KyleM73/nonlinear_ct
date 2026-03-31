@@ -52,3 +52,10 @@ wandb/
 *.snm
 *.vrb
 *.DS_Store
+
+# Data
+*.png
+*.txt
+
+# Models
+*.pt
